@@ -1,8 +1,7 @@
-from typing import Any
-
 import cv2
 import numpy as np
 import pandas as pd
+import torch
 from torch.utils.data import Dataset
 
 
@@ -57,8 +56,9 @@ def preprocess_image(
 
 class MammoCNNDataset(Dataset):
     """
-    Dataset clss for first stage of MAMMO CNN training
+    Dataset class for first stage of MAMMO CNN training
     """
+
     def __init__(self, image_df: pd.DataFrame, is_training: bool = False) -> None:
         self.image_df = image_df
         self.is_training = is_training
@@ -74,27 +74,27 @@ class MammoCNNDataset(Dataset):
         sign = row["finding_categories"]
         suspicion = row["breast_birads"]
         density = row["breast_density"]
-        age = row["Patient's Age"]
+        age = row["age"]
 
         image = preprocess_image(image_path, laterality)
         image = apply_clahe(image, is_training=self.is_training)
 
         if self.is_training:
-            # Apply random gaussian noise with σ=0.01 per channel
             image = image.astype(np.float32) / 255.0
             noise = np.random.normal(0, 0.01, image.shape).astype(np.float32)
             image = np.clip(image + noise, 0.0, 1.0)
 
-        # Standardize the image per channel (mean = 0, std = 1)
         mean = image.mean()
         std = image.std()
         image = (image - mean) / (std + 1e-8)
 
+        image = np.transpose(image, (2, 0, 1))  # HWC -> CHW
+
         return {
             "mammogram": image,
-            "diagnosis": diagnosis,
-            "sign": sign,
-            "suspicion": suspicion,
-            "density": density,
-            "age": age,
+            "diagnosis": torch.tensor(diagnosis, dtype=torch.long),
+            "sign": torch.tensor(sign, dtype=torch.float32),  # [10]
+            "suspicion": torch.tensor(suspicion, dtype=torch.float32),  # [5]
+            "density": torch.tensor(density, dtype=torch.float32),  # [4]
+            "age": torch.tensor(age, dtype=torch.float32),
         }
