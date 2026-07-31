@@ -2,3 +2,4 @@
 .vscode/
 vindr-mammo/
 __pycache__/
+.env
