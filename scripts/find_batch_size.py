@@ -1,11 +1,6 @@
 """
 Find the largest batch size that fits on this GPU, for a given image size.
 
-Anchor from the paper (Appendix C-B): batch 16 was "the largest that fit within
-GPU memory constraints" on an 11GB GTX 1080 Ti in fp32. Scaling that by memory
-and by AMP gives a rough expectation, but activation memory does not scale
-perfectly linearly, so measure rather than extrapolate.
-
 Usage
 -----
     python -m scripts.find_batch_size

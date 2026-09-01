@@ -152,9 +152,6 @@ def get_lds_weights(
     # Map label values to bin indices
     n_bins = label_max - label_min + 1  # Number of discrete label values
 
-    # A kernel at least as wide as the support smooths the histogram towards
-    # uniform and throws the weights away. Density has only 4 bins, so the
-    # default kernel_size=5 would be degenerate there — shrink to fit.
     max_kernel_size = n_bins if n_bins % 2 == 1 else n_bins - 1
     if kernel_size > max_kernel_size:
         kernel_size = max(1, max_kernel_size)
@@ -213,28 +210,13 @@ def compute_multi_task_loss(
     """
     Computes the weighted multi-task loss for MAMMO CNN.
 
-    On `loss_scales`: the paper states that "loss weighting was adjusted
-    according to the auxiliary output losses, such that the loss weight for
-    diagnosis was greater than or equal to the sum of all other auxiliary
-    output losses" (Kyono et al., Appendix C-B). LOSS_WEIGHTS encodes the
-    intent, but a coefficient only equals a share of the gradient if the raw
-    losses share a scale — and they do not. Focal loss shrinks towards zero by
-    design, while CORAL sums weighted BCE over 4 cutpoints. Left uncorrected,
-    `diagnosis: 0.50` lands at ~4% of the signal and suspicion takes ~70%.
-
-    `loss_scales` divides each task by its own magnitude, so the coefficients
-    mean what they say. Build it with calibrate_loss_scales(), which measures
-    the magnitudes once before training and freezes them — deliberately not a
-    running average, since re-normalising every step would keep amplifying a
-    task that has converged and no auxiliary would ever be allowed to finish.
-
     Args:
         outputs: dict of model outputs for each task
         targets: dict of ground truth labels for each task
         loss_weights: dict of weights for each task's loss
-        findings_weights: Optional class weights for the findings head
-        suspicion_weights: Optional per-cutpoint pos_weight for suspicion
-        density_weights: Optional class weights for the density head
+        findings_weights: class weights for the findings head
+        suspicion_weights: per-cutpoint pos_weight for suspicion
+        density_weights: class weights for the density head
         loss_scales: Optional per-task multipliers from calibrate_loss_scales()
         alpha: Focal Loss alpha parameter. NOTE: the paper uses alpha=2 because
             its Eq. 8 defines alpha as an inverse-class-frequency multiplier.
@@ -286,6 +268,7 @@ def compute_multi_task_loss(
         reduction="mean",
         use_softmax=False,
     )
+    density_loss_fn = CrossEntropyLoss(weight=density_weights, reduction="mean")
     age_loss_fn = MSELoss(reduction="mean")
 
     diagnosis_loss: torch.Tensor = diagnosis_loss_fn(diagnosis_logits, diagnosis_target)
@@ -295,9 +278,7 @@ def compute_multi_task_loss(
     suspicion_loss: torch.Tensor = coral_loss(
         outputs["suspicion"], targets["suspicion"], cutpoint_weights=suspicion_weights
     )
-    density_loss: torch.Tensor = ordinal_weighted_ce(
-        outputs["density"], targets["density"], class_weights=density_weights
-    )
+    density_loss: torch.Tensor = density_loss_fn(outputs["density"], targets["density"])
     age_loss: torch.Tensor = age_loss_fn(outputs["age"], targets["age"])
 
     raw = {
@@ -314,9 +295,8 @@ def compute_multi_task_loss(
         for task, value in raw.items()
     )
 
-    # Report raw values — they are what you monitor per task, and what
-    # calibrate_loss_scales() consumes. Use effective_contributions() to see
-    # the post-scale gradient shares.
+    # Report raw values for logging and effective contribution calculation,
+    # but don't backprop through them
     loss_components = {task: value.item() for task, value in raw.items()}
 
     return total_loss, loss_components  # type: ignore
@@ -348,12 +328,6 @@ def coral_loss(
     """
     CORAL ordinal loss — the sum of the per-cutpoint binary cross-entropies.
 
-    Because cutpoint k answers "is y > k?", getting a distant level wrong
-    violates several cutpoints at once while a neighbouring level violates
-    only one. Ordinal distance is therefore penalised without any explicit
-    distance term: predicting level 0 for a true level 4 costs 4 cutpoint
-    errors, predicting 3 costs 1.
-
     Args:
         cutpoint_logits: (B, K-1) raw logits from CoralHead
         labels: (B,) long tensor of 0-based levels
@@ -377,47 +351,13 @@ def coral_loss(
     return per_cutpoint.sum(dim=1).mean()
 
 
-def ordinal_weighted_ce(
-    logits: torch.Tensor,
-    labels: torch.Tensor,
-    class_weights: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """
-    Class-weighted cross-entropy for the density head.
-
-    Density is ordinal too, but in VinDr-Mammo it is ~76% class C with only
-    ~0.5% class A, so the head cannot realistically learn the tails and
-    density is a report field rather than an urgency driver. Plain weighted
-    CE is the right amount of machinery here; pass LDS weights via
-    `class_weights` (with kernel_size=3 — 4 bins will not support 5).
-
-    Args:
-        logits: (B, n_density) raw logits
-        labels: (B,) long tensor of 0-based density classes
-        class_weights: optional (n_density,) per-class weights
-
-    Returns:
-        scalar mean loss
-    """
-    if class_weights is not None:
-        class_weights = class_weights.to(logits.device)
-
-    return CrossEntropyLoss(weight=class_weights, reduction="mean")(logits, labels)
-
-
 def effective_contributions(
     loss_components: dict[str, float],
-    loss_weights: dict[str, float] | None = None,
+    loss_weights: dict[str, float],
     loss_scales: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """
     Share of the total loss each task actually contributes.
-
-    With calibrated `loss_scales` this should match LOSS_WEIGHTS closely at the
-    start of training, then drift as tasks converge at different rates — a task
-    getting easier legitimately gives up share. Without scales it shows the raw
-    mismatch instead. Either way it is logged every epoch so the allocation is
-    never a silent accident.
 
     Returns:
         dict of task -> fraction of total weighted loss
@@ -452,18 +392,7 @@ def calibrate_loss_scales(
 
     Feed the result back as `loss_scales` and LOSS_WEIGHTS becomes literal: a
     coefficient of 0.50 really is half the loss. Run this ONCE on the
-    freshly-initialised model, before training, and keep the constants fixed
-    for the whole run so tasks remain free to converge.
-
-    `max_scale` matters more than it looks. A task whose loss happens to start
-    near zero would get an unbounded multiplier and then dominate training on
-    pure noise — age is the realistic candidate, since a standardised target
-    the model already predicts well can start with a very small MSE. The cap
-    keeps such a task from hijacking the run; if a scale saturates it, that
-    head is already solved and does not need the gradient.
-
-    Measurement runs in eval mode, so dropout is off and the numbers are
-    reproducible rather than sampled from one dropout mask.
+    freshly-initialised model, before training.
 
     Args:
         model: MammoCNN, freshly initialised
@@ -532,12 +461,9 @@ def ordinal_class_probs(cutpoint_logits: torch.Tensor) -> torch.Tensor:
     Convert CORAL cutpoint logits into a per-level probability distribution.
 
     From the cumulative probabilities P(y > k):
-        P(y = 0)     = 1 - P(y > 0)
-        P(y = k)     = P(y > k-1) - P(y > k)
+        P(y = 0) = 1 - P(y > 0)
+        P(y = k) = P(y > k-1) - P(y > k)
         P(y = K - 1) = P(y > K - 2)
-
-    These differences are non-negative only if the CDF is monotone, which
-    CoralHead's decreasing-bias parameterisation guarantees.
 
     Args:
         cutpoint_logits: (B, K-1) raw cutpoint logits
@@ -580,19 +506,6 @@ def evaluate(
 ) -> dict[str, Any]:
     """
     Run one validation pass and return metrics for every head.
-
-    Mirrors the paper's Table I — per-class AUROC for each categorical task,
-    MAE for the regression tasks — and adds average precision throughout,
-    since at ~5% prevalence AUROC flatters while AP tracks what a triage queue
-    needs. The paper makes the same argument for AUPRC over AUROC (§V-B).
-
-    Findings gets BOTH macro and per-class numbers on purpose: prevalence spans
-    5.3% to 0.095%, so a single macro figure hides that the four rarest classes
-    are near-unlearnable. Per-class is the only honest view.
-
-    Also reports the ordinal head's estimate of the diagnosis cutpoint
-    ("ordinal_*") so the dedicated diagnosis head and CORAL's P(BI-RADS > 3)
-    can be compared on identical labels.
 
     Args:
         model: MammoCNN (or compatible)
@@ -690,10 +603,8 @@ def evaluate(
     metrics["findings_ap_per_class"] = per_class_ap
     metrics["findings_support"] = support
     # macro over classes that actually have positives in this split
-    metrics["findings_macro_auc"] = float(
-        np.nanmean([v for v in per_class_auc.values()])
-    )
-    metrics["findings_macro_ap"] = float(np.nanmean([v for v in per_class_ap.values()]))
+    metrics["findings_macro_auc"] = float(np.nanmean(list(per_class_auc.values())))
+    metrics["findings_macro_ap"] = float(np.nanmean(list(per_class_ap.values())))
     # micro: pool all class-instance pairs, dominated by the common classes
     metrics["findings_micro_ap"] = _safe_ap(
         findings_label.ravel(), findings_score.ravel()
@@ -759,10 +670,10 @@ def train(
     val_loader: DataLoader,
     device: torch.device,
     epochs: int = 10,
-    patience: int = 5,
+    patience: int = 15,
     learning_rate: float = 1e-4,
     lr_decay_factor: float = 0.1,
-    lr_patience: int = 3,
+    lr_patience: int = 5,
     min_lr: float = 1e-6,
     warmup_epochs: float = 1.0,
     backbone_lr_mult: float = 0.1,
@@ -780,21 +691,6 @@ def train(
 ) -> dict[str, Any]:
     """
     Train the MAMMO CNN with gradient accumulation.
-
-    Accumulation exists because the diagnosis positives sit at ~5%: with
-    batch_size=32 roughly one batch in five contains no positive at all
-    (0.9505^32 = 0.196), so the diagnosis gradient is badly behaved. Two
-    accumulation steps give an effective batch of 64 and drop that to ~3.8%,
-    which is the cheap fix for keeping the natural class prior — no
-    WeightedRandomSampler, so predicted probabilities stay calibrated for the
-    Abnormality Index and the Co-pilot confidence gate.
-
-    Checkpointing, early stopping AND the LR schedule all key off the single
-    `monitor`/`monitor_mode` pair. Driving the scheduler from val_loss while
-    selecting on diagnosis_ap would let the two disagree: with five heads,
-    val_loss is a composite that four auxiliary tasks can keep pushing down
-    while the primary task has already plateaued, so the LR would never decay
-    when diagnosis needs it to.
 
     Args:
         model: MammoCNN instance
@@ -838,9 +734,6 @@ def train(
     if monitor_mode not in ("max", "min"):
         raise ValueError(f"monitor_mode must be 'max' or 'min', got {monitor_mode!r}")
 
-    # One LR reduction needs room to show an effect before the run is killed.
-    # With patience <= lr_patience the run stops before the decayed LR is ever
-    # evaluated, so the schedule silently does nothing.
     if patience <= lr_patience:
         warnings.warn(
             f"patience={patience} <= lr_patience={lr_patience}: training will stop "
@@ -940,9 +833,7 @@ def train(
             # `is_last` matters: without it a trailing partial group would be
             # computed, never stepped, and silently carried into the next epoch
             if is_step or is_last:
-                # Warmup is applied per optimizer step, not per epoch — the
-                # damage from a too-large LR on pretrained weights happens in
-                # the first few hundred steps, long before epoch 1 ends.
+                # Warmup is applied per optimizer step
                 if optimizer_step < warmup_steps:
                     ramp = (optimizer_step + 1) / warmup_steps
                     for group in optimizer.param_groups:
@@ -1007,7 +898,7 @@ def train(
 
         shares = effective_contributions(
             components_mean,
-            loss_kwargs.get("loss_weights"),
+            loss_kwargs.get("loss_weights"),  # type: ignore
             loss_kwargs.get("loss_scales"),
         )
         history.setdefault("loss_shares", []).append(shares)
@@ -1061,8 +952,6 @@ def train(
 
             if checkpoint_path is not None:
                 Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
-                # Save enough to resume, not just to infer — an interrupted
-                # A100 run should not have to restart from epoch 1.
                 torch.save(
                     {
                         "model": best_state,
@@ -1108,16 +997,6 @@ def get_coral_cutpoint_weights(
     """
     Per-cutpoint `pos_weight` for `coral_loss`.
 
-    Cutpoint k is the binary problem "is y > k?", each with its own imbalance —
-    on VinDr-Mammo that runs from roughly 2:1 at k=0 to 77:1 at k=3. Weighting
-    each threshold separately is what makes a single ordinal head work across
-    all of them.
-
-    `max_pos_weight` caps the rarest cutpoints. Uncapped, BI-RADS 5 lands near
-    77 and a batch of 32 will almost never contain a positive, so the gradient
-    for that cutpoint is dominated by a handful of images. Raise the cap if you
-    care more about BI-RADS 5 recall than about gradient variance.
-
     Args:
         levels: 0-based ordinal training labels
         n_cutpoints: number of cutpoints (n_classes - 1)
@@ -1150,18 +1029,6 @@ def get_findings_weights(
 ) -> torch.Tensor:
     """
     Per-class weights for the multilabel findings head.
-
-    Prevalence spans 5.3% (Mass) down to 0.095% (Skin Retraction), a 55x range.
-
-    Order of operations matters: normalise to mean 1.0 FIRST, then clip. Clipping
-    raw 1/prevalence values collapses every class rarer than 1/max_weight onto
-    the same ceiling — with max_weight=20 that flattens 9 of these 10 classes to
-    ~1.0 and silently removes all the reweighting.
-
-    `sqrt_inverse` is the default because full inverse prevalence drives Mass —
-    the most common and most clinically load-bearing finding — down to 0.06x
-    while Skin Retraction reaches 3.2x. The square root keeps the ordering but
-    compresses the range to roughly 0.27x-2.0x.
 
     Args:
         findings_matrix: (N, C) binary matrix of training labels

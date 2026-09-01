@@ -178,7 +178,7 @@ class MammoCNN(Module):
 if __name__ == "__main__":
     # Quick sanity check
     model = MammoCNN(pretrained=True).eval()
-    dummy_input = torch.randn(1, 3, 320, 416)  # (B, C, H, W)
+    dummy_input = torch.randn(1, 3, 720, 1280)  # (B, C, H, W)
 
     with torch.no_grad():
         outputs = model(dummy_input)
