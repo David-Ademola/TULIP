@@ -1,3 +1,4 @@
+# pylint: disable = C0302
 import copy
 import math
 import warnings
@@ -11,6 +12,7 @@ import torch
 from monai.losses.focal_loss import FocalLoss
 from scipy.ndimage import convolve1d
 from scipy.stats import norm
+from skimage.exposure import equalize_adapthist
 from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.nn import CrossEntropyLoss, Module, MSELoss
 from torch.nn.functional import binary_cross_entropy_with_logits
@@ -42,6 +44,9 @@ DENSITY_MIN: int = 1
 
 TASKS: tuple[str, ...] = ("diagnosis", "findings", "suspicion", "density", "age")
 
+CLAHE_CLIP_SCALE: float = 0.005
+CLAHE_NBINS: int = 256
+
 
 def apply_clahe(
     image: np.ndarray | torch.Tensor,
@@ -50,14 +55,15 @@ def apply_clahe(
     is_training: bool = False,
 ) -> torch.Tensor:
     """
-    Applies Contrast Limited Adaptive Histogram Equalization (CLAHE)
-    to each channel. Accepts either a NumPy array or a Torch tensor and
-    returns a Torch tensor in CHW format.
+    Applies Contrast Limited Adaptive Histogram Equalization (CLAHE) and
+    returns a 3-channel float32 tensor in CHW format with values in [0, 1].
+    Accepts a NumPy array or a Torch tensor, 1- or 3-channel, int or float.
+
+    `grid_size` and `clip_limit` are in the paper's units; see
+    CLAHE_CLIP_SCALE for the conversion.
     """
     # Accept both NumPy arrays and torch tensors
-    tensor_input = isinstance(image, torch.Tensor)
-
-    if tensor_input:
+    if isinstance(image, torch.Tensor):
         if image.ndim == 3:
             # Convert CHW -> HWC
             image_np = image.permute(1, 2, 0).cpu().numpy()
@@ -68,15 +74,27 @@ def apply_clahe(
     else:
         image_np = image
 
-    if image_np.dtype in (np.float32, np.float64, np.float16):
-        image_np = np.clip(image_np * 255.0, 0, 255).astype(np.uint8)
-
-    if image_np.ndim == 2 or (image_np.ndim == 3 and image_np.shape[-1] == 1):
-        image_np = cv2.cvtColor(image_np, cv2.COLOR_GRAY2RGB)
-    elif image_np.ndim == 3 and image_np.shape[-1] == 3:
-        pass
-    else:
+    # Equalise a single channel.
+    if image_np.ndim == 3:
+        if image_np.shape[-1] == 3:
+            assert np.array_equal(
+                image_np[..., 0], image_np[..., 1]
+            ) and np.array_equal(image_np[..., 0], image_np[..., 2]), (
+                "apply_clahe got a 3-channel image whose channels differ"
+            )
+        elif image_np.shape[-1] != 1:
+            raise ValueError(f"Unsupported image shape for CLAHE: {image_np.shape}")
+        image_np = image_np[..., 0]
+    elif image_np.ndim != 2:
         raise ValueError(f"Unsupported image shape for CLAHE: {image_np.shape}")
+
+    # Scale by the dtype's own maximum so 8-bit and 16-bit sources both land in
+    # [0, 1].
+    if np.issubdtype(image_np.dtype, np.integer):
+        image_np = image_np.astype(np.float32) / float(np.iinfo(image_np.dtype).max)
+    else:
+        image_np = image_np.astype(np.float32)
+    image_np = np.clip(image_np, 0.0, 1.0)
 
     if is_training:
         grid_size = int(
@@ -86,35 +104,54 @@ def apply_clahe(
             -np.log2(clip_limit), np.log2(clip_limit)
         )
 
-    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
-    channels = cv2.split(image_np)
-    equalized_channels = [clahe.apply(channel) for channel in channels]
-    image_np = cv2.merge(equalized_channels)
+    grid_size = max(1, grid_size)
+    height, width = image_np.shape
 
-    image_tensor = torch.from_numpy(image_np.astype(np.float32) / 255.0)
-    image_tensor = image_tensor.permute(2, 0, 1)
+    equalized = equalize_adapthist(
+        image_np,
+        kernel_size=(max(1, height // grid_size), max(1, width // grid_size)),
+        clip_limit=clip_limit * CLAHE_CLIP_SCALE,
+        nbins=CLAHE_NBINS,
+    ).astype(np.float32)
+
+    # timm builds inception_resnet_v2 with the default in_chans=3
+    image_tensor = torch.from_numpy(equalized).unsqueeze(0).repeat(3, 1, 1)
 
     return image_tensor
 
 
 def preprocess_image(
-    image_path: str, laterality: str, target_size: tuple = (416, 320)
+    image_path: str,
+    laterality: str,
+    target_size: tuple = (1024, 1280),  # (H, W)
 ) -> torch.Tensor:
     """
     Preprocesses the image by loading, orienting, downsampling, and
-    returning a normalized grayscale tensor.
+    returning a normalized single-channel tensor with values in [0, 1].
     """
-    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
 
     if image is None:
         raise FileNotFoundError(image_path)
 
+    if image.ndim == 3:
+        image = image[..., 0]
+
+    # Scale by the dtype's own maximum, so a 16-bit PNG and a legacy 8-bit one
+    # both land in [0, 1]
+    if np.issubdtype(image.dtype, np.integer):
+        image = image.astype(np.float32) / float(np.iinfo(image.dtype).max)  # type: ignore
+    else:
+        image = image.astype(np.float32)
+
     image = cv2.flip(image, 1) if laterality.upper() == "R" else image
+
+    # Resize in float and clip afterwards: Lanczos has negative lobes and rings
+    # past the input range, which would wrap around if it were cast to uint16.
     image = cv2.resize(image, target_size, interpolation=cv2.INTER_LANCZOS4)
+    image = np.clip(image, 0.0, 1.0)
 
-    image = torch.from_numpy(image.astype(np.float32) / 255.0).unsqueeze(0)
-
-    return image
+    return torch.from_numpy(image).unsqueeze(0)
 
 
 def get_lds_weights(

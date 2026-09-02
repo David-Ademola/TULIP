@@ -10,6 +10,7 @@ pyarrow
 pydicom
 pylibjpeg
 pylibjpeg-libjpeg
+scikit-image
 scikit-learn
 scipy
 timm
