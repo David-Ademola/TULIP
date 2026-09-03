@@ -4,7 +4,7 @@ Find the largest batch size that fits on this GPU, for a given image size.
 Usage
 -----
     python -m scripts.find_batch_size
-    python -m scripts.find_batch_size --height 832 --width 640
+    python -m scripts.find_batch_size --height 1280 --width 1024
     python -m scripts.find_batch_size --no-amp --max-batch 512
 
 Runs a real forward + backward + optimizer step, because inference-only probing
@@ -88,8 +88,8 @@ def try_batch_size(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--height", type=int, default=320)
-    parser.add_argument("--width", type=int, default=416)
+    parser.add_argument("--height", type=int, default=1280)
+    parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--max-batch", type=int, default=512)
     parser.add_argument("--no-amp", action="store_true", help="measure in fp32")
     parser.add_argument(

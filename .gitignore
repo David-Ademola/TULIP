@@ -3,3 +3,4 @@
 vindr-mammo/
 __pycache__/
 .env
+models/mammo_cnn_phase1.pt

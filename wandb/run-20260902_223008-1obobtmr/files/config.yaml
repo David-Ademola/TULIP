@@ -1,0 +1,158 @@
+_wandb:
+    value:
+        cli_version: 0.29.0
+        e:
+            ibgj61a0glmc5mum1fp5eld2o1b85bna:
+                codePath: /home/ubuntu/TULIP/main.ipynb
+                codePathLocal: main.ipynb
+                cpu_count: 30
+                cpu_count_logical: 30
+                cudaVersion: "13.0"
+                disk:
+                    /:
+                        total: "515813314560"
+                        used: "402930507776"
+                email: dakinwande350@gmail.com
+                executable: /home/ubuntu/TULIP/.venv/bin/python
+                git:
+                    commit: d75803fae84cf71ff679a9b168357df493f8c3ed
+                    remote: https://github.com/David-Ademola/TULIP.git
+                gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 24064
+                      memoryTotal: "102641958912"
+                      name: NVIDIA RTX PRO 6000 Blackwell Server Edition
+                      uuid: GPU-342cd2c0-4ff0-83f4-c5e2-644be4401075
+                host: tulip-vm
+                memory:
+                    total: "211057664000"
+                os: Linux-6.8.0-138-generic-x86_64-with-glibc2.39
+                program: /home/ubuntu/TULIP/main.ipynb
+                python: CPython 3.12.3
+                root: /home/ubuntu/TULIP
+                startedAt: "2026-09-02T22:30:08.399857Z"
+                writerId: ibgj61a0glmc5mum1fp5eld2o1b85bna
+        m: []
+        python_version: 3.12.3
+        t:
+            "1":
+                - 1
+                - 5
+                - 41
+                - 49
+                - 48
+                - 53
+                - 63
+            "2":
+                - 1
+                - 5
+                - 41
+                - 49
+                - 48
+                - 53
+                - 63
+            "3":
+                - 1
+                - 2
+                - 13
+                - 16
+                - 62
+                - 61
+            "4": 3.12.3
+            "5": 0.29.0
+            "8":
+                - 1
+            "12": 0.29.0
+            "13": linux-x86_64
+accumulation_steps:
+    value: 2
+alpha:
+    value: 0.9505494505494505
+alpha_strategy:
+    value: one_minus_positive_rate
+backbone:
+    value: inception_resnet_v2
+backbone_lr:
+    value: 2.9999999999999997e-05
+backbone_lr_mult:
+    value: 0.1
+batch_size:
+    value: 48
+benign_weight:
+    value: 0.0494505494505495
+density_class_weights:
+    value:
+        - 3.4963245391845703
+        - 1.1973024606704712
+        - 0.9430631399154663
+        - 1.084905743598938
+effective_batch:
+    value: 96
+epochs:
+    value: 100
+findings_class_weights:
+    value:
+        - 0.270595520734787
+        - 1.5052615404129028
+        - 0.7982854843139648
+        - 1.3615602254867554
+        - 0.39836543798446655
+        - 0.5285326242446899
+        - 0.877223551273346
+        - 1.1289461851119995
+        - 1.1117093563079834
+        - 2.0195202827453613
+freeze_schedule:
+    value: none (full network from step 1)
+gamma:
+    value: 2
+image_size:
+    value:
+        - 1280
+        - 1024
+learning_rate:
+    value: 0.0003
+loss_scales:
+    value:
+        age: 1.0952853972969159
+        density: 0.7362640210806216
+        diagnosis: 61.163348448338255
+        findings: 5.5074791330836534
+        suspicion: 0.19513032076559977
+loss_weights:
+    value:
+        age: 0.1
+        density: 0.1
+        diagnosis: 0.5
+        findings: 0.15
+        suspicion: 0.15
+malignant_weight:
+    value: 0.9505494505494505
+n_train_images:
+    value: 10556
+n_val_images:
+    value: 1760
+phase:
+    value: cnn-phase1
+positive_rate:
+    value: 0.04945054945054945
+pretrained:
+    value: true
+sampler:
+    value: none (class weighting in loss)
+seed:
+    value: 42
+suspicion_cutpoint_weights:
+    value:
+        - 2.000568389892578
+        - 9.534930229187012
+        - 19.22222137451172
+        - 20
+suspicion_head:
+    value: coral-ordinal
+warmup_epochs:
+    value: 2
+weight_decay:
+    value: 0.0001

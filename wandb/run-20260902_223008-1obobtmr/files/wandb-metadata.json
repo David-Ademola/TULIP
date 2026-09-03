@@ -1,0 +1,40 @@
+{
+  "os":  "Linux-6.8.0-138-generic-x86_64-with-glibc2.39",
+  "python":  "CPython 3.12.3",
+  "startedAt":  "2026-09-02T22:30:08.399857Z",
+  "program":  "/home/ubuntu/TULIP/main.ipynb",
+  "codePath":  "/home/ubuntu/TULIP/main.ipynb",
+  "codePathLocal":  "main.ipynb",
+  "git":  {
+    "remote":  "https://github.com/David-Ademola/TULIP.git",
+    "commit":  "d75803fae84cf71ff679a9b168357df493f8c3ed"
+  },
+  "email":  "dakinwande350@gmail.com",
+  "root":  "/home/ubuntu/TULIP",
+  "host":  "tulip-vm",
+  "executable":  "/home/ubuntu/TULIP/.venv/bin/python",
+  "cpu_count":  30,
+  "cpu_count_logical":  30,
+  "gpu":  "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "515813314560",
+      "used":  "402930507776"
+    }
+  },
+  "memory":  {
+    "total":  "211057664000"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "memoryTotal":  "102641958912",
+      "cudaCores":  24064,
+      "architecture":  "Blackwell",
+      "uuid":  "GPU-342cd2c0-4ff0-83f4-c5e2-644be4401075"
+    }
+  ],
+  "cudaVersion":  "13.0",
+  "writerId":  "ibgj61a0glmc5mum1fp5eld2o1b85bna"
+}

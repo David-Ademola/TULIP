@@ -1,4 +1,4 @@
-# pylint: disable = C0302
+# pylint: disable = C0302, E0611
 import copy
 import math
 import warnings
@@ -123,7 +123,7 @@ def apply_clahe(
 def preprocess_image(
     image_path: str,
     laterality: str,
-    target_size: tuple = (1024, 1280),  # (H, W)
+    target_size: tuple = (1024, 1280),  # (W, H)
 ) -> torch.Tensor:
     """
     Preprocesses the image by loading, orienting, downsampling, and
@@ -281,6 +281,16 @@ def compute_multi_task_loss(
             f"target * alpha + (1 - target) * (1 - alpha), so alpha={alpha} would "
             f"give negative samples a negative weight and reward wrong predictions."
         )
+
+    # ── Move class weights onto the logits' device ────────────────────
+    device = outputs["diagnosis"].device
+
+    if findings_weights is not None:
+        findings_weights = findings_weights.to(device)
+    if suspicion_weights is not None:
+        suspicion_weights = suspicion_weights.to(device)
+    if density_weights is not None:
+        density_weights = density_weights.to(device)
 
     # ── Diagnosis: binary focal loss ──────────────────────────────────
     # MONAI indexes input.shape[1], so the head must stay (B, 1) — never (B,).
@@ -639,9 +649,12 @@ def evaluate(
     metrics["findings_auc_per_class"] = per_class_auc
     metrics["findings_ap_per_class"] = per_class_ap
     metrics["findings_support"] = support
+    metrics["n_images"] = int(findings_label.shape[0])
+
     # macro over classes that actually have positives in this split
     metrics["findings_macro_auc"] = float(np.nanmean(list(per_class_auc.values())))
     metrics["findings_macro_ap"] = float(np.nanmean(list(per_class_ap.values())))
+
     # micro: pool all class-instance pairs, dominated by the common classes
     metrics["findings_micro_ap"] = _safe_ap(
         findings_label.ravel(), findings_score.ravel()
@@ -956,6 +969,31 @@ def train(
             f"microAP {metrics['findings_micro_ap']:.4f}  "
             f"macroAUC {metrics['findings_macro_auc']:.4f}"
         )
+
+        findings_ap = metrics["findings_ap_per_class"]
+        findings_auc = metrics["findings_auc_per_class"]
+        findings_support = metrics["findings_support"]
+        n_images = metrics.get("n_images", 0)
+        print(
+            f"      {'per class (by support)':<28}"
+            f"{'AP':>8}{'AUC':>8}{'n':>6}{'AP/prev':>9}"
+        )
+        for name in sorted(findings_support, key=lambda k: -findings_support[k]):
+            n_pos = findings_support[name]
+            average_precision = findings_ap.get(name, float("nan"))
+            area = findings_auc.get(name, float("nan"))
+            if n_pos == 0 or not n_images:
+                print(
+                    f"      {str(name)[:28]:<28}{'--':>8}{'--':>8}"
+                    f"{n_pos:>6}{'--':>9}   (no positives in split)"
+                )
+                continue
+            prevalence = n_pos / n_images
+            lift = average_precision / prevalence if prevalence > 0 else float("nan")
+            print(
+                f"      {str(name)[:28]:<28}{average_precision:>8.4f}"
+                f"{area:>8.4f}{n_pos:>6}{lift:>9.2f}"
+            )
         print(
             f"    suspicion  MAE {metrics['suspicion_mae']:.3f}  "
             f"exact {metrics['suspicion_exact']:.3f}"
