@@ -1,0 +1,36 @@
+2026-09-03 12:13:49,258 INFO    MainThread:5715 [wandb_setup.py:_flush():81] Current SDK version is 0.29.0
+2026-09-03 12:13:49,258 INFO    MainThread:5715 [wandb_setup.py:_flush():81] Configure stats pid to 5715
+2026-09-03 12:13:49,258 INFO    MainThread:5715 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-09-03 12:13:49,258 INFO    MainThread:5715 [wandb_init.py:setup_run_log_directory():739] Logging user logs to /home/ubuntu/TULIP/wandb/run-20260903_121349-nlrwqjhw/logs/debug.log
+2026-09-03 12:13:49,258 INFO    MainThread:5715 [wandb_init.py:setup_run_log_directory():740] Logging internal logs to /home/ubuntu/TULIP/wandb/run-20260903_121349-nlrwqjhw/logs/debug-internal.log
+2026-09-03 12:13:49,258 INFO    MainThread:5715 [wandb_init.py:monkeypatch_ipython():658] configuring jupyter hooks <wandb.sdk.wandb_init._WandbInit object at 0x72a57c6eddf0>
+2026-09-03 12:13:49,258 INFO    MainThread:5715 [wandb_init.py:init():783] calling init triggers
+2026-09-03 12:13:49,258 INFO    MainThread:5715 [wandb_init.py:init():788] wandb.init called with sweep_config: {}
+config: {'phase': 'cnn-phase1', 'backbone': 'inception_resnet_v2', 'pretrained': True, 'image_size': [1280, 1024], 'batch_size': 48, 'accumulation_steps': 2, 'effective_batch': 96, 'epochs': 100, 'learning_rate': 0.0003, 'backbone_lr_mult': 0.1, 'backbone_lr': 2.9999999999999997e-05, 'warmup_epochs': 2.0, 'weight_decay': 0.0001, 'freeze_schedule': 'none (full network from step 1)', 'seed': 42, 'loss_weights': {'diagnosis': 0.5, 'findings': 0.15, 'suspicion': 0.15, 'density': 0.1, 'age': 0.1}, 'loss_scales': {'diagnosis': 4.885724351036362, 'findings': 5.5074791330836534, 'suspicion': 0.19513032076559977, 'density': 0.7362640210806216, 'age': 1.0952853972969159}, 'alpha': 0.04945054945054945, 'alpha_strategy': 'positive_rate', 'malignant_weight': 0.04945054945054945, 'benign_weight': 0.9505494505494505, 'gamma': 2.0, 'suspicion_head': 'coral-ordinal', 'sampler': 'none (class weighting in loss)', 'suspicion_cutpoint_weights': [2.000568389892578, 9.534930229187012, 19.22222137451172, 20.0], 'findings_class_weights': [0.270595520734787, 1.5052615404129028, 0.7982854843139648, 1.3615602254867554, 0.39836543798446655, 0.5285326242446899, 0.877223551273346, 1.1289461851119995, 1.1117093563079834, 2.0195202827453613], 'density_class_weights': [3.4963245391845703, 1.1973024606704712, 0.9430631399154663, 1.084905743598938], 'n_train_images': 10556, 'n_val_images': 1760, 'positive_rate': 0.04945054945054945, '_wandb': {}}
+2026-09-03 12:13:49,258 INFO    MainThread:5715 [wandb_init.py:init():831] starting backend
+2026-09-03 12:13:49,258 INFO    MainThread:5715 [wandb_init.py:init():846] sending inform_init request
+2026-09-03 12:13:50,500 INFO    MainThread:5715 [wandb_init.py:init():851] backend started and connected
+2026-09-03 12:13:50,508 INFO    MainThread:5715 [wandb_run.py:_label_probe_notebook():1221] probe notebook
+2026-09-03 12:13:50,509 INFO    MainThread:5715 [wandb_init.py:init():921] updated telemetry
+2026-09-03 12:13:50,516 INFO    MainThread:5715 [wandb_init.py:init():944] communicating run to backend with 90.0 second timeout
+2026-09-03 12:13:51,951 INFO    MainThread:5715 [wandb_init.py:init():981] starting run threads in backend
+2026-09-03 12:13:52,002 INFO    MainThread:5715 [wandb_run.py:_console_start():2545] atexit reg
+2026-09-03 12:13:52,002 INFO    MainThread:5715 [wandb_run.py:_redirect():2395] redirect: wrap_raw
+2026-09-03 12:13:52,002 INFO    MainThread:5715 [wandb_run.py:_redirect():2464] Wrapping output streams.
+2026-09-03 12:13:52,002 INFO    MainThread:5715 [wandb_run.py:_redirect():2487] Redirects installed.
+2026-09-03 12:13:52,005 INFO    MainThread:5715 [wandb_init.py:init():1019] run started, returning control to user process
+2026-09-03 12:13:52,005 INFO    MainThread:5715 [wandb_watch.py:_watch():69] Watching
+2026-09-03 12:13:52,010 INFO    MainThread:5715 [wandb_init.py:_post_run_cell_hook():624] [no run ID] resuming backend
+2026-09-03 12:15:14,867 INFO    MainThread:5715 [jupyter.py:save_ipynb():368] [no run ID] not saving jupyter notebook
+2026-09-03 12:15:14,867 INFO    MainThread:5715 [wandb_init.py:_pre_run_cell_hook():613] [no run ID] pausing backend
+2026-09-03 14:06:42,234 INFO    MainThread:5715 [wandb_init.py:_post_run_cell_hook():624] [no run ID] resuming backend
+2026-09-03 14:13:13,975 INFO    MainThread:5715 [jupyter.py:save_ipynb():368] [no run ID] not saving jupyter notebook
+2026-09-03 14:13:13,976 INFO    MainThread:5715 [wandb_init.py:_pre_run_cell_hook():613] [no run ID] pausing backend
+2026-09-03 14:13:43,046 INFO    MainThread:5715 [wandb_run.py:_finish():2316] finishing run moyinoluwa-university-of-lagos/tulip-mammo-cnn/nlrwqjhw
+2026-09-03 14:13:43,064 INFO    MainThread:5715 [jupyter.py:save_history():441] not saving jupyter history
+2026-09-03 14:13:43,064 INFO    MainThread:5715 [jupyter.py:save_ipynb():368] not saving jupyter notebook
+2026-09-03 14:13:43,064 INFO    MainThread:5715 [wandb_init.py:_jupyter_teardown():637] cleaning up jupyter logic
+2026-09-03 14:13:43,064 INFO    MainThread:5715 [wandb_run.py:_atexit_cleanup():2512] got exitcode: 0
+2026-09-03 14:13:43,064 INFO    MainThread:5715 [wandb_run.py:_restore():2494] restore
+2026-09-03 14:13:43,064 INFO    MainThread:5715 [wandb_run.py:_restore():2500] restore done
+2026-09-03 14:13:48,656 INFO    MainThread:5715 [wandb_run.py:_footer_sync_info():3917] logging synced files
