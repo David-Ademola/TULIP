@@ -332,9 +332,98 @@ the paper, not a deviation.
 and freezes `1/magnitude`. **Measured after: exactly 50.0 / 15.0 / 15.0 / 10.0 /
 10.0, 0.00 pp deviation.**
 
-Deliberately **not** a running average — re-normalising every step would keep
-amplifying a converged task so no auxiliary could ever finish. Drift across
-epochs is expected and correct.
+Deliberately **not** a running average. The conclusion stands but the reason
+this file used to give ("drift is expected and correct; a task getting easier
+legitimately gives up share") was wrong, and the correction matters.
+
+#### ⚠️ The calibrated shares hold for exactly one epoch
+
+50/15/15/10/10 is true at step 0 and gone by epoch 2. Recovering the raw
+per-task losses from run 1's own logged shares
+(`L_i = share_i * total / (w_i * s_i)`):
+
+| epoch | diagnosis | findings | suspicion | density | age |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 0.0311 | 0.0650 | 4.7371 | 0.9718 | 0.9391 |
+| 2 | 0.0062 | 0.0110 | 4.5556 | 0.7819 | 0.8299 |
+| 21 | 0.0038 | 0.0067 | 2.9599 | 0.4255 | 0.4711 |
+
+The two focal heads collapse to **0.12x / 0.10x within one epoch** and then go
+flat; CORAL only reaches 0.62x across all 21. Logged shares sat at
+**5/3/47/16/29 for 20 consecutive epochs**.
+
+That is not a task conceding share as it converges. Focal loss shrinks toward
+zero **by construction** — diagnosis shed 88% of its loss magnitude during
+epoch 1, while the model was still only at AUROC ~0.7. **Loss magnitude does not
+measure how much a task has left to learn**, so the calibration buys one epoch
+of the intended balance and nothing after.
+
+#### ⚠️ Loss share is not gradient share — the two invert
+
+The reason the collapse above is nonetheless *survivable* is that share-of-loss
+and share-of-gradient come apart. Measured with the real loss functions and the
+real label marginals, on a fresh model and again after the focal terms had
+converged:
+
+| task | loss share (step 0) | grad share (step 0) | loss share (conv.) | grad share (conv.) |
+| --- | --- | --- | --- | --- |
+| diagnosis | 52.1% | 54.6% | **7.3%** | **60.1%** |
+| findings | 14.2% | 21.7% | 3.6% | 1.6% |
+| suspicion | 15.0% | 5.6% | 28.9% | 21.3% |
+| density | 9.5% | 11.6% | 23.4% | 3.7% |
+| age | 9.2% | 6.5% | 36.8% | 13.4% |
+
+So run 1's "loss share diagnosis 5%" was never evidence that diagnosis was being
+starved — it held ~60% of the gradient throughout, consistent with the 61-64%
+in §5. On a real freshly-initialised `MammoCNN` the gap is visible immediately:
+50.8% of the loss, **64.1%** of the gradient.
+
+⚠️ Caveat: the converged row comes from a probe on random features, so the heads
+can only learn priors. The *mechanism* (focal collapse, and the inversion) is a
+property of the losses and reproduces run 1's shrink ordering — diagnosis and
+findings collapse hardest, CORAL barely moves — but the exact percentages are
+the probe's, not run 1's.
+
+#### Why the shares are not re-normalised each epoch
+
+Restoring 50/15/15/10/10 mid-training was considered and rejected on
+measurement, not taste. Dividing by the current magnitude makes the objective
+`sum_i w_i * log L_i`, so each task's effective LR becomes `1 / L_i` and diverges
+as it converges. Applied at the converged state above:
+
+```
+diagnosis grad share   60.1%  ->  52.6%      (it goes DOWN)
+implied LR multiplier: findings 16.81x  suspicion 2.10x  density 1.73x  diagnosis 1.70x
+```
+
+It *lowers* the primary task's gradient share and its real effect is training
+**findings ~17x harder** — the head where only 2 of 10 classes are learnable at
+all (§Gate 4). It would also be unmeasurable: at 84 val positives the AP CI is
+0.208 wide (§Gate 0), so a loss-weighting tweak cannot be resolved in one run.
+If the intended balance is ever wanted mid-training, the bounded version is to
+recalibrate **once at the end of warmup** — no feedback loop.
+
+#### `train()` reports gradient share, not loss share
+
+`gradient_shares()` (`src/utils.py`) replaced `effective_contributions()` in the
+epoch print and in W&B (`train/grad_share/*`, was `train/loss_share/*`). It
+differentiates each task's weighted, scaled loss w.r.t. the output of
+`model.shared_trunk` — the (B, 1024) representation every head reads — and
+averages the norm over `grad_share_batches` training batches (default 4; one
+batch of 48 has an 8.8% chance of holding no malignant case, §6 sampler note).
+Backprop stops at the trunk output and never enters the backbone, so the cost is
+~5 s/epoch. It runs in `eval()` mode and restores the previous mode, so it
+cannot mutate BatchNorm running statistics or leak `.grad` onto parameters —
+both verified.
+
+`compute_task_losses()` was split out of `compute_multi_task_loss()` so the
+measurement differentiates *the same* loss definitions the training loop uses,
+rather than a second copy that could drift. Verified bit-exact against the
+existing components.
+
+`effective_contributions()` is kept for `main.ipynb`'s step-0 sanity check,
+where `calibrate_loss_scales` has just forced loss share and gradient share into
+agreement and the check is meaningful.
 
 There is a `max_scale=100.0` cap: a task whose loss starts near zero would
 otherwise get an unbounded multiplier and dominate on noise (age is the
@@ -596,7 +685,11 @@ Load with `torch.load(path)["model"]`.
 
 - CORAL monotonicity holds for all inputs, including adversarial biases
 - CORAL loss is exactly linear in ordinal distance (6.01/level)
-- Loss scale calibration hits 50/15/15/10/10 with 0.00 pp deviation
+- Loss scale calibration hits 50/15/15/10/10 with 0.00 pp deviation — and
+  **holds it for exactly one epoch** (§6); run 1 sat at 5/3/47/16/29 for 20
+- `compute_task_losses` is bit-exact against `compute_multi_task_loss`'s
+  components; `gradient_shares` sums to 1.0, restores train/eval mode, mutates
+  no BatchNorm statistics and leaks no `.grad`
 - Warmup ramps correctly; backbone holds at exactly 0.1×; plateau decay fires
 - Early stopping + resumable checkpoint (all 7 keys present)
 - Metadata notebook regenerates 2,226 findings positives

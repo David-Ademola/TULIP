@@ -240,28 +240,28 @@ def get_lds_weights(
     return {val: float(weights[idx]) for val, idx in label_to_bin.items()}
 
 
-def compute_multi_task_loss(
+def compute_task_losses(
     outputs: dict[str, torch.Tensor],
     targets: dict[str, torch.Tensor],
-    loss_weights: dict[str, float] | None = None,
     findings_weights: torch.Tensor | None = None,
     suspicion_weights: torch.Tensor | None = None,
     density_weights: torch.Tensor | None = None,
-    loss_scales: dict[str, float] | None = None,
     alpha: float = 0.25,
     gamma: float = 2.0,
-) -> tuple[torch.Tensor, dict[str, float]]:
+) -> dict[str, torch.Tensor]:
     """
-    Computes the weighted multi-task loss for MAMMO CNN.
+    Per-task raw losses, still attached to the autograd graph.
+
+    Split out of compute_multi_task_loss so `gradient_shares` can differentiate
+    one task at a time without a second copy of the loss definitions that could
+    drift out of step with the one actually being trained on.
 
     Args:
         outputs: dict of model outputs for each task
         targets: dict of ground truth labels for each task
-        loss_weights: dict of weights for each task's loss
         findings_weights: class weights for the findings head
         suspicion_weights: per-cutpoint pos_weight for suspicion
         density_weights: class weights for the density head
-        loss_scales: Optional per-task multipliers from calibrate_loss_scales()
         alpha: Focal Loss alpha parameter. NOTE: the paper uses alpha=2 because
             its Eq. 8 defines alpha as an inverse-class-frequency multiplier.
             MONAI uses Lin et al.'s other parameterisation where alpha is a
@@ -270,18 +270,8 @@ def compute_multi_task_loss(
         gamma: Focal Loss gamma parameter
 
     Returns:
-        total_loss: The combined weighted loss for all tasks
-        individual_losses: dict of raw (unscaled) loss values for each task
+        dict of task -> scalar loss tensor, unweighted and unscaled
     """
-    if loss_weights is None:
-        loss_weights = LOSS_WEIGHTS
-
-    assert loss_weights["diagnosis"] >= sum(
-        v for k, v in loss_weights.items() if k != "diagnosis"
-    ), (
-        "Diagnosis loss weight must be greater than or equal to the sum of auxiliary task weights."
-    )
-
     if not 0.0 <= alpha <= 1.0:
         raise ValueError(
             f"alpha must lie in [0, 1] — MONAI applies it as "
@@ -325,23 +315,66 @@ def compute_multi_task_loss(
     density_loss_fn = CrossEntropyLoss(weight=density_weights, reduction="mean")
     age_loss_fn = MSELoss(reduction="mean")
 
-    diagnosis_loss: torch.Tensor = diagnosis_loss_fn(diagnosis_logits, diagnosis_target)
-    findings_loss: torch.Tensor = findings_loss_fn(
-        outputs["findings"], targets["findings"].float()
-    )
-    suspicion_loss: torch.Tensor = coral_loss(
-        outputs["suspicion"], targets["suspicion"], cutpoint_weights=suspicion_weights
-    )
-    density_loss: torch.Tensor = density_loss_fn(outputs["density"], targets["density"])
-    age_loss: torch.Tensor = age_loss_fn(outputs["age"], targets["age"])
-
-    raw = {
-        "diagnosis": diagnosis_loss,
-        "findings": findings_loss,
-        "suspicion": suspicion_loss,
-        "density": density_loss,
-        "age": age_loss,
+    return {
+        "diagnosis": diagnosis_loss_fn(diagnosis_logits, diagnosis_target),
+        "findings": findings_loss_fn(outputs["findings"], targets["findings"].float()),
+        "suspicion": coral_loss(
+            outputs["suspicion"],
+            targets["suspicion"],
+            cutpoint_weights=suspicion_weights,
+        ),
+        "density": density_loss_fn(outputs["density"], targets["density"]),
+        "age": age_loss_fn(outputs["age"], targets["age"]),
     }
+
+
+def compute_multi_task_loss(
+    outputs: dict[str, torch.Tensor],
+    targets: dict[str, torch.Tensor],
+    loss_weights: dict[str, float] | None = None,
+    findings_weights: torch.Tensor | None = None,
+    suspicion_weights: torch.Tensor | None = None,
+    density_weights: torch.Tensor | None = None,
+    loss_scales: dict[str, float] | None = None,
+    alpha: float = 0.25,
+    gamma: float = 2.0,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """
+    Computes the weighted multi-task loss for MAMMO CNN.
+
+    Args:
+        outputs: dict of model outputs for each task
+        targets: dict of ground truth labels for each task
+        loss_weights: dict of weights for each task's loss
+        findings_weights: class weights for the findings head
+        suspicion_weights: per-cutpoint pos_weight for suspicion
+        density_weights: class weights for the density head
+        loss_scales: Optional per-task multipliers from calibrate_loss_scales()
+        alpha: Focal Loss alpha parameter — see compute_task_losses
+        gamma: Focal Loss gamma parameter
+
+    Returns:
+        total_loss: The combined weighted loss for all tasks
+        individual_losses: dict of raw (unscaled) loss values for each task
+    """
+    if loss_weights is None:
+        loss_weights = LOSS_WEIGHTS
+
+    assert loss_weights["diagnosis"] >= sum(
+        v for k, v in loss_weights.items() if k != "diagnosis"
+    ), (
+        "Diagnosis loss weight must be greater than or equal to the sum of auxiliary task weights."
+    )
+
+    raw = compute_task_losses(
+        outputs,
+        targets,
+        findings_weights=findings_weights,
+        suspicion_weights=suspicion_weights,
+        density_weights=density_weights,
+        alpha=alpha,
+        gamma=gamma,
+    )
 
     # scale (put every task on a common magnitude) then weight (apply intent)
     total_loss = sum(
@@ -413,6 +446,11 @@ def effective_contributions(
     """
     Share of the total loss each task actually contributes.
 
+    ⚠️ A share of the loss VALUE is not a share of the GRADIENT, and for focal
+    loss the two invert within one epoch — see `gradient_shares`, which is what
+    the training loop reports. This is still the right check at step 0, where
+    `calibrate_loss_scales` has just forced the two into agreement.
+
     Returns:
         dict of task -> fraction of total weighted loss
     """
@@ -430,6 +468,92 @@ def effective_contributions(
         return dict.fromkeys(weighted, 0.0)
 
     return {task: value / total for task, value in weighted.items()}
+
+
+def gradient_shares(
+    model: Module,
+    loader: DataLoader,
+    device: torch.device,
+    loss_kwargs: dict | None = None,
+    n_batches: int = 4,
+) -> dict[str, float]:
+    """
+    Share of the gradient pressure on the shared trunk contributed by each task.
+
+    Args:
+        model: MammoCNN, or any model exposing `shared_trunk`
+        loader: a loader over the training split
+        device: torch device
+        loss_kwargs: the same dict passed to compute_multi_task_loss. Its
+            `loss_weights` and `loss_scales` are applied, so the shares describe
+            the objective actually being optimised, not the raw losses.
+        n_batches: batches to average each task's gradient norm over. At 4.95%
+            positives one batch of 48 has an 8.8% chance of containing no
+            malignant case at all, which would make the diagnosis gradient
+            unrepresentative; averaging over several batches removes that.
+
+    Returns:
+        dict of task -> fraction of the total gradient norm, summing to 1.0
+    """
+    trunk = getattr(model, "shared_trunk", None)
+    if trunk is None:
+        raise AttributeError(
+            "gradient_shares needs a model exposing `shared_trunk`; got "
+            f"{type(model).__name__}"
+        )
+
+    loss_kwargs = dict(loss_kwargs or {})
+    loss_weights = loss_kwargs.pop("loss_weights", None) or LOSS_WEIGHTS
+    loss_scales = loss_kwargs.pop("loss_scales", None) or {}
+
+    was_training = model.training
+    model.eval()
+    model.to(device)
+
+    captured: dict[str, torch.Tensor] = {}
+
+    def capture(_module, _inputs, output: torch.Tensor) -> None:
+        captured["shared"] = output
+
+    handle = trunk.register_forward_hook(capture)
+
+    totals: dict[str, float] = dict.fromkeys(loss_weights, 0.0)
+    seen = 0
+
+    try:
+        for batch in loader:
+            images = batch["mammogram"].to(device, non_blocking=True)
+            targets = {
+                key: value.to(device, non_blocking=True)
+                for key, value in batch.items()
+                if key != "mammogram"
+            }
+
+            outputs = model(images)
+            shared = captured["shared"]
+            raw = compute_task_losses(outputs, targets, **loss_kwargs)
+
+            for task, value in raw.items():
+                term = loss_weights.get(task, 0.0) * loss_scales.get(task, 1.0) * value
+                (grad,) = torch.autograd.grad(term, shared, retain_graph=True)
+                totals[task] += float(grad.norm())
+
+            seen += 1
+            if seen >= n_batches:
+                break
+    finally:
+        handle.remove()
+        if was_training:
+            model.train()
+
+    if seen == 0:
+        raise ValueError("loader yielded no batches")
+
+    total = sum(totals.values())
+    if total == 0:
+        return dict.fromkeys(totals, 0.0)
+
+    return {task: value / total for task, value in totals.items()}
 
 
 @torch.no_grad()
@@ -789,6 +913,7 @@ def train(
     monitor: str = "diagnosis_ap",
     monitor_mode: str = "max",
     use_amp: bool = True,
+    grad_share_batches: int = 4,
     findings_names: list[str] | None = None,
     age_std: float | None = None,
     wandb_run: Any | None = None,
@@ -825,6 +950,10 @@ def train(
         monitor: validation metric driving checkpoints, early stop and LR decay
         monitor_mode: "max" for AP/AUROC style metrics, "min" for losses/MAE
         use_amp: enable mixed precision (CUDA only; ignored on CPU)
+        grad_share_batches: training batches per epoch used to measure each
+            task's share of the gradient on the shared trunk. 0 disables the
+            measurement. Costs one forward plus a head-only backward per
+            batch, so ~5 s/epoch at batch 48 — see `gradient_shares`.
         findings_names: class names for per-class findings metrics
         age_std: training-set age std, so age MAE is reported in years
         wandb_run: an active `wandb.init()` run to log to, or None
@@ -1000,12 +1129,19 @@ def train(
         for key, value in metrics.items():
             history.setdefault(key, []).append(value)
 
-        shares = effective_contributions(
-            components_mean,
-            loss_kwargs.get("loss_weights"),  # type: ignore
-            loss_kwargs.get("loss_scales"),
+        # Gradient share
+        shares = (
+            gradient_shares(
+                model,
+                train_loader,
+                device,
+                loss_kwargs,
+                n_batches=grad_share_batches,
+            )
+            if grad_share_batches > 0
+            else {}
         )
-        history.setdefault("loss_shares", []).append(shares)
+        history.setdefault("grad_shares", []).append(shares)
 
         lr_text = "  ".join(f"lr[{n}] {v:.2e}" for n, v in group_lrs.items())
         print(
@@ -1072,10 +1208,13 @@ def train(
         )
         print(f"      {'per-class F1':<28}{density_text}")
         print(f"    age        MAE {metrics['age_mae_years']:.2f} yrs")
-        print(
-            "    loss share "
-            + "  ".join(f"{task} {100 * share:.0f}%" for task, share in shares.items())
-        )
+        if shares:
+            print(
+                "    grad share "
+                + "  ".join(
+                    f"{task} {100 * share:.0f}%" for task, share in shares.items()
+                )
+            )
 
         if wandb_run is not None:
             wandb_run.log(
@@ -1085,7 +1224,7 @@ def train(
                     "train/loss": train_loss,
                     **{f"train/lr/{n}": v for n, v in group_lrs.items()},
                     **{f"train/raw_loss/{k}": v for k, v in components_mean.items()},
-                    **{f"train/loss_share/{k}": v for k, v in shares.items()},
+                    **{f"train/grad_share/{k}": v for k, v in shares.items()},
                 },
                 step=epoch,
             )
