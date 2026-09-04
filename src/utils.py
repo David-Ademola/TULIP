@@ -13,7 +13,14 @@ from monai.losses.focal_loss import FocalLoss
 from scipy.ndimage import convolve1d
 from scipy.stats import norm
 from skimage.exposure import equalize_adapthist
-from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.metrics import (
+    average_precision_score,
+    cohen_kappa_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from torch.nn import CrossEntropyLoss, Module, MSELoss
 from torch.nn.functional import binary_cross_entropy_with_logits
 from torch.optim import AdamW
@@ -571,6 +578,7 @@ def evaluate(
     model.to(device)
 
     losses: list[float] = []
+    n_density_classes = 0
     collected: dict[str, list[np.ndarray]] = {
         key: []
         for key in (
@@ -579,7 +587,7 @@ def evaluate(
             "diagnosis_label",
             "findings_score",
             "findings_label",
-            "suspicion_probs",
+            "suspicion_cutpoint_scores",
             "suspicion_level_pred",
             "suspicion_level_true",
             "density_pred",
@@ -611,10 +619,11 @@ def evaluate(
         add("findings_score", torch.sigmoid(outputs["findings"]))
         add("findings_label", targets["findings"])
 
-        add("suspicion_probs", ordinal_class_probs(outputs["suspicion"]))
+        add("suspicion_cutpoint_scores", torch.sigmoid(outputs["suspicion"]))
         add("suspicion_level_pred", MammoCNN.suspicion_to_level(outputs["suspicion"]))
         add("suspicion_level_true", targets["suspicion"])
 
+        n_density_classes = outputs["density"].shape[1]
         add("density_pred", outputs["density"].argmax(dim=1))
         add("density_true", targets["density"])
 
@@ -660,28 +669,66 @@ def evaluate(
         findings_label.ravel(), findings_score.ravel()
     )
 
-    # ── Suspicion: per-level AUROC, as in the paper's Table I ─────────
-    probs = joined["suspicion_probs"]
+    # ── Suspicion: ordinal ───────────────
     true_levels = joined["suspicion_level_true"]
-    metrics["suspicion_auc_per_level"] = {
-        f"birads_{level + BIRADS_MIN}": _safe_auc(
-            (true_levels == level).astype(int), probs[:, level]
+    pred_levels = joined["suspicion_level_pred"]
+    n_levels = joined["suspicion_cutpoint_scores"].shape[1] + 1
+
+    metrics["suspicion_qwk"] = float(
+        cohen_kappa_score(
+            true_levels, pred_levels, weights="quadratic", labels=list(range(n_levels))
         )
-        for level in range(probs.shape[1])
-    }
-    metrics["suspicion_mae"] = float(
-        np.abs(joined["suspicion_level_pred"] - true_levels).mean()
-    )
-    metrics["suspicion_exact"] = float(
-        (joined["suspicion_level_pred"] == true_levels).mean()
     )
 
-    # ── Density and age ───────────────────────────────────────────────
-    metrics["density_accuracy"] = float(
-        (joined["density_pred"] == joined["density_true"]).mean()
+    # Per-CUTPOINT AUROC — "is y > k?"
+    metrics["suspicion_auc_per_cutpoint"] = {
+        f"gt_{level + BIRADS_MIN}": _safe_auc(
+            (true_levels > level).astype(int),
+            joined["suspicion_cutpoint_scores"][:, level],
+        )
+        for level in range(n_levels - 1)
+    }
+
+    # ── Density: ordinal too (A < B < C < D) ─────────
+    density_true = joined["density_true"]
+    density_pred = joined["density_pred"]
+    density_labels = list(range(n_density_classes))
+
+    for name, fn in (
+        ("precision", precision_score),
+        ("recall", recall_score),
+        ("f1", f1_score),
+    ):
+        metrics[f"density_{name}"] = float(
+            fn(
+                density_true,
+                density_pred,
+                average="macro",
+                labels=density_labels,
+                zero_division=0,
+            )
+        )
+
+    # Per-class F1
+    per_class_f1 = f1_score(
+        density_true,
+        density_pred,
+        average=None,
+        labels=density_labels,
+        zero_division=0,
     )
-    metrics["density_mae"] = float(
-        np.abs(joined["density_pred"] - joined["density_true"]).mean()
+    metrics["density_f1_per_class"] = {
+        f"class_{chr(ord('A') + i)}": float(v)
+        for i, v in enumerate(per_class_f1)  # type: ignore
+    }
+    metrics["density_support"] = {
+        f"class_{chr(ord('A') + i)}": int((density_true == i).sum())
+        for i in density_labels
+    }
+    metrics["density_qwk"] = float(
+        cohen_kappa_score(
+            density_true, density_pred, weights="quadratic", labels=density_labels
+        )
     )
 
     age_mae = float(np.abs(joined["age_pred"] - joined["age_true"]).mean())
@@ -701,10 +748,17 @@ def _flatten_for_wandb(metrics: dict[str, Any]) -> dict[str, float]:
     Class names are slugged because spaces in keys make panel filters awkward.
     """
     flat: dict[str, float] = {}
+    scalar_keys = {k for k, v in metrics.items() if not isinstance(v, dict)}
 
     for key, value in metrics.items():
         if isinstance(value, dict):
-            group = key.removesuffix("_per_class").removesuffix("_per_level")
+            group = (
+                key.removesuffix("_per_class")
+                .removesuffix("_per_level")
+                .removesuffix("_per_cutpoint")
+            )
+            if group in scalar_keys:
+                group = key
             for name, item in value.items():
                 slug = str(name).lower().replace(" ", "_")
                 flat[f"val/{group}/{slug}"] = float(item)
@@ -974,10 +1028,12 @@ def train(
         findings_auc = metrics["findings_auc_per_class"]
         findings_support = metrics["findings_support"]
         n_images = metrics.get("n_images", 0)
+
         print(
             f"      {'per class (by support)':<28}"
             f"{'AP':>8}{'AUC':>8}{'n':>6}{'AP/prev':>9}"
         )
+
         for name in sorted(findings_support, key=lambda k: -findings_support[k]):
             n_pos = findings_support[name]
             average_precision = findings_ap.get(name, float("nan"))
@@ -994,13 +1050,28 @@ def train(
                 f"      {str(name)[:28]:<28}{average_precision:>8.4f}"
                 f"{area:>8.4f}{n_pos:>6}{lift:>9.2f}"
             )
-        print(
-            f"    suspicion  MAE {metrics['suspicion_mae']:.3f}  "
-            f"exact {metrics['suspicion_exact']:.3f}"
-            f"   |  density  acc {metrics['density_accuracy']:.3f}  "
-            f"MAE {metrics['density_mae']:.3f}"
-            f"   |  age MAE {metrics['age_mae_years']:.2f} yrs"
+
+        cutpoint_text = "  ".join(
+            f"{name.replace('gt_', '>')} {value:.3f}"
+            for name, value in metrics["suspicion_auc_per_cutpoint"].items()
         )
+        print(
+            f"    suspicion  QWK {metrics['suspicion_qwk']:.4f}"
+            f"   cutpoint AUROC  {cutpoint_text}"
+        )
+
+        density_text = "  ".join(
+            f"{name.replace('class_', '')} {value:.3f}"
+            for name, value in metrics["density_f1_per_class"].items()
+        )
+        print(
+            f"    density    QWK {metrics['density_qwk']:.4f}  "
+            f"macroP {metrics['density_precision']:.3f}  "
+            f"macroR {metrics['density_recall']:.3f}  "
+            f"macroF1 {metrics['density_f1']:.3f}"
+        )
+        print(f"      {'per-class F1':<28}{density_text}")
+        print(f"    age        MAE {metrics['age_mae_years']:.2f} yrs")
         print(
             "    loss share "
             + "  ".join(f"{task} {100 * share:.0f}%" for task, share in shares.items())

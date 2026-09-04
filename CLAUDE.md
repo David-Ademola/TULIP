@@ -78,7 +78,7 @@ Validation at epoch 14 (1,760 images, **only 84 diagnosis positives**):
 | findings | macroAP 0.100, microAP 0.236, macroAUC 0.744 |
 | Mass | AP 0.313 (5.25x prevalence) |
 | Suspicious Calcification | AP 0.316 (13.9x prevalence) |
-| density | acc 0.768 (val majority share 0.742 -> ~2.6 pp of real signal) |
+| density | acc 0.768 against a 0.742 majority share -> ~2.6 pp of real signal. Accuracy is **no longer reported**; see §6 |
 | age | MAE 5.78 years |
 
 ⚠️ **Do not quote AP 0.467 as "the result".** It is the maximum over 21 epochs
@@ -102,10 +102,10 @@ loss rose 15% (0.715 -> 0.824) and AP never returned within 0.07 of the peak.
 Early stopping was correct; more epochs will not help. The train-loss column
 falling is what "still improving" looks like, and it is misleading.
 
-Per-level suspicion AUROC is **below chance for BI-RADS 2, 3 and 4**
-(0.456 / 0.459 / 0.433) while the >=4 cutpoint reads 0.817. Ranking is strong;
-CDF differencing is not yielding usable per-level probabilities. Relevant if a
-faithful Table I reproduction is wanted.
+Run 1 also logged per-level suspicion AUROC, which read **below chance for
+BI-RADS 2, 3 and 4** (0.456 / 0.459 / 0.433) while the >=4 cutpoint read 0.817.
+That metric has since been **removed** — it measures cutpoint calibration, not
+discrimination (§6). Judge the ordinal head by `suspicion_auc_per_cutpoint`.
 
 ## 3. Repo layout
 
@@ -501,6 +501,62 @@ and resizes it to the non-square output — measured with a test circle, every
 training image was stretched **1.250x** vertically while val/test (no transform)
 were not, i.e. a train/val geometry mismatch. The correct value is
 `ratio = (IMAGE_SIZE[1] / IMAGE_SIZE[0],) * 2`, which measured 1.001.
+
+### Metric choices for the ordinal heads — and one metric that lies
+
+Suspicion (BI-RADS 1-5) and density (A-D) are both **ordinal**, so neither MAE
+nor accuracy nor plain macro-F1 is the right single summary.
+
+**Reported for both: quadratic weighted kappa (QWK).** It is the standard for
+ordinal medical grading, is chance-corrected so imbalance cannot inflate it, and
+penalises by *squared* ordinal distance — predicting 2 for a true 5 costs 9x
+what predicting 4 costs. Precision/recall/F1 treat every misclassification as
+equally wrong, which is the exact property rejected when CORAL was chosen over a
+softmax, so QWK carries the ordinal information those metrics discard.
+
+**Density accuracy is not reported, on purpose.** At a 74-76% majority share,
+"always answer C" scores ~0.75. Run 1 measured 0.768 against a 0.742 baseline —
+2.6 pp of real signal. Macro recall *is* balanced accuracy and is the
+like-for-like replacement. Per-class F1 is also reported because with only 4
+classes a macro average hides which one collapsed (class A, ~0.5% prevalence,
+is expected near zero).
+
+⚠️ **Use `average="macro"`, never `"weighted"`.** For single-label multiclass,
+weighted recall is *mathematically identical to accuracy*
+(`sum_k (n_k/N)(TP_k/n_k) = sum_k TP_k/N`), so switching to weighted silently
+reinstates the metric that was removed. Measured on the real density marginals
+with an always-predict-C model:
+
+```
+                    accuracy   macro P/R/F1              weighted P/R/F1
+always predict C     0.7653    0.191 / 0.250 / 0.217     0.586 / 0.765 / 0.664
+```
+
+Weighted F1 of 0.66 makes a model that learned nothing look competent; macro
+correctly reports 0.22 against a 0.25 chance level.
+
+⚠️ **Per-level suspicion AUROC was removed — do not add it back.** `P(y=k)`
+from CDF differencing is unimodal in the shared CORAL scalar, so ranking by it
+means ranking by *closeness to a peak* whose position the cutpoint biases set,
+not by the ordinal score. Measured on synthetic data with a **perfect** ranker:
+
+```
+                                   per-cutpoint (y>k)   per-level (y==k)
+calibrated cutpoints                1.000 x4            1.000 / 1.000 / 1.000 / 1.000 / 1.000
+cutpoints shifted (pos_weight-size) 1.000 x4            1.000 / 0.991 / 0.445 / 0.024 / 1.000
+```
+
+Per-cutpoint AUROC is rank-based on a single scalar and is **immune** to the
+shift; per-level AUROC collapses below chance in the middle. Our
+`suspicion_weights` are exactly such a shift (`[2.0, 9.53, 19.22, 20.0]`), and
+run 1's shape — extremes fine, middle collapsed — matched the simulation. So
+**`suspicion_auc_per_cutpoint`** ("is y > k?") is the per-threshold metric.
+
+`ordinal_class_probs()` still exists for the Co-pilot's drafted report, which
+needs a per-level BI-RADS distribution; it is simply no longer a metric. Note
+the paper's Table I per-level numbers came from a *softmax* head, whose
+per-class probabilities are unconstrained — that row is not reproducible with a
+CORAL head, and reproducing it is not a project goal.
 
 ### One metric drives everything
 
